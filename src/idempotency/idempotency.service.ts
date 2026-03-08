@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { RedisService } from '../common/redis/redis.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { Prisma } from '../generated/prisma/client';
@@ -16,7 +17,7 @@ export class IdempotencyService {
   private readonly ttlSeconds: number;
 
   // Placeholder rows older than this are considered abandoned (store() or release() failed)
-  private static readonly STALE_THRESHOLD_MS = 60_000;
+  private readonly staleThresholdMs: number;
 
   constructor(
     private readonly redis: RedisService,
@@ -25,6 +26,7 @@ export class IdempotencyService {
   ) {
     const ttlHours = this.configService.get<number>('IDEMPOTENCY_TTL_HOURS', 24);
     this.ttlSeconds = ttlHours * 3600;
+    this.staleThresholdMs = this.configService.get<number>('IDEMPOTENCY_STALE_THRESHOLD_MS', 60_000);
   }
 
   private redisKey(key: string) {
@@ -44,8 +46,9 @@ export class IdempotencyService {
     if (acquired) {
       // Redis lock acquired — now insert PostgreSQL placeholder
       try {
+        const expiresAt = new Date(Date.now() + this.ttlSeconds * 1000);
         await this.prisma.idempotencyRecord.create({
-          data: { key, requestHash },
+          data: { key, requestHash, expiresAt },
         });
         return { status: 'miss' }; // Lock acquired, proceed with request
       } catch (error: unknown) {
@@ -79,9 +82,27 @@ export class IdempotencyService {
 
   /** Inspect existing idempotency state from PostgreSQL only. */
   private async inspectFromDb(key: string, requestHash: string): Promise<IdempotencyCheckResult> {
-    const record = await this.prisma.idempotencyRecord.findUnique({ where: { key } });
+    const record = await this.prisma.idempotencyRecord.findUnique({
+      where: { key },
+    });
     if (!record) {
       // Redis lock exists but DB record missing — likely mid-insert race or DB insert failed
+      return { status: 'in_progress' };
+    }
+
+    if (record.expiresAt <= new Date()) {
+      // Record expired — safe to clean up and allow retry since TTL has passed
+      this.logger.log(`Expired idempotency record for key ${key}, cleaning up`);
+      try {
+        await this.prisma.idempotencyRecord.delete({ where: { key } });
+      } catch {
+        // Best-effort — cron will clean up eventually
+      }
+      try {
+        await this.redis.del(this.redisKey(key));
+      } catch {
+        // Redis key has TTL, will expire eventually
+      }
       return { status: 'in_progress' };
     }
 
@@ -90,12 +111,12 @@ export class IdempotencyService {
     }
     if (!record.statusCode) {
       // Placeholder with no response — check if it's stale (store() or release() failed).
-      // If older than threshold, clean up and allow retry rather than blocking forever.
+      // If older than threshold, return in_progress to prevent unsafe retries when
+      // the original request may have already caused side effects (e.g., transaction created).
+      // Manual intervention is required to resolve truly abandoned placeholders.
       const ageMs = Date.now() - record.createdAt.getTime();
-      if (ageMs > IdempotencyService.STALE_THRESHOLD_MS) {
-        this.logger.warn(`Stale idempotency placeholder for key ${key} (${ageMs}ms old), releasing for retry`);
-        await this.forceCleanup(key);
-        return { status: 'miss' };
+      if (ageMs > this.staleThresholdMs) {
+        this.logger.warn(`Stale idempotency placeholder for key ${key} (${ageMs}ms old), returning in_progress — manual cleanup may be needed`);
       }
       return { status: 'in_progress' };
     }
@@ -169,17 +190,14 @@ export class IdempotencyService {
     }
   }
 
-  /** Force-clean both Redis and DB for an abandoned placeholder. */
-  private async forceCleanup(key: string): Promise<void> {
-    try {
-      await this.prisma.idempotencyRecord.delete({ where: { key } });
-    } catch {
-      // Best-effort — staleness check will retry on next request
+  @Cron(CronExpression.EVERY_HOUR)
+  async cleanupExpiredRecords(): Promise<number> {
+    const result = await this.prisma.idempotencyRecord.deleteMany({
+      where: { expiresAt: { lte: new Date() } },
+    });
+    if (result.count > 0) {
+      this.logger.log(`Cleaned up ${result.count} expired idempotency records`);
     }
-    try {
-      await this.redis.del(this.redisKey(key));
-    } catch {
-      // Redis key has TTL, will expire eventually
-    }
+    return result.count;
   }
 }

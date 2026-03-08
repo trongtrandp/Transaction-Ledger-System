@@ -108,7 +108,7 @@ describe('TransactionProcessor', () => {
       expect(prisma.transaction.updateMany).toHaveBeenCalledWith({
         where: {
           id: 'tx-1',
-          status: { in: [TransactionStatus.QUEUED, TransactionStatus.PROCESSING, TransactionStatus.FAILED] },
+          status: { in: [TransactionStatus.QUEUED, TransactionStatus.FAILED] },
         },
         data: { status: TransactionStatus.PROCESSING },
       });

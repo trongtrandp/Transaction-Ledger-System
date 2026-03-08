@@ -46,7 +46,7 @@ Traced from actual application code paths. PostgreSQL query counts below are exa
 | 6 | `TransactionProcessor.process()` | `prisma.transaction.findUnique()` — guard | PG |
 | 7 | `TransactionProcessor.process()` | `prisma.transaction.updateMany()` → PROCESSING | PG |
 | 8 | `TransactionProcessor.process()` | `prisma.transaction.update()` → COMPLETED | PG |
-| 9–13 | `TransactionProcessor.enqueueNotification()` | `notificationQueue.add()` — BullMQ enqueue path | ~5× Redis |
+| 9–13 | `TransactionProcessor.enqueueNotification()` | `notificationQueue.add()` — BullMQ enqueue path, only when `fromAccount ?? toAccount` yields a recipient | ~5× Redis |
 
 **Approx. total: ~10 Redis ops + 3 PG queries**
 
@@ -55,10 +55,11 @@ Traced from actual application code paths. PostgreSQL query counts below are exa
 | Step | Source | Operation | Type |
 |------|--------|-----------|------|
 | 1–5 | BullMQ worker internals | dequeue/ack/state-management commands | ~5× Redis |
-| 6 | `NotificationProcessor.process()` | `prisma.notification.count()` — dedup guard | PG |
-| 7 | `NotificationProcessor.process()` | `prisma.notification.create()` — persist | PG |
+| 6 | `NotificationProcessor.process()` | `prisma.notification.create()` — persist DELIVERED; duplicates are handled by catching a unique-constraint violation (`P2002`) | PG |
 
-**Approx. total: ~5 Redis ops + 2 PG queries**
+**Approx. total: ~5 Redis ops + 1 PG write attempt**
+
+Failure-path note: if retries are exhausted, `NotificationProcessor.onFailed()` performs a `prisma.notification.upsert()` to mark the row as `DEAD_LETTER`.
 
 #### Read Path (GET /transactions)
 
@@ -69,14 +70,14 @@ Traced from actual application code paths. PostgreSQL query counts below are exa
 
 **Total: 0 Redis ops + 2 PG queries** (both run in parallel via `Promise.all`)
 
-#### I/O Summary per Write Transaction (full lifecycle)
+#### I/O Summary per Write Transaction (worst-case full lifecycle with notification)
 
 | Layer | HTTP | Background | Notification | Total |
 |-------|-----:|----------:|-------------:|------:|
-| PG queries | 3 | 3 | 2 | **8** |
+| PG queries | 3 | 3 | 1 | **7** |
 | Redis ops | ~7 | ~10 | ~5 | **~22** |
 
-One user-facing write request triggers 8 PG queries and roughly 22 Redis operations across its full lifecycle when BullMQ internals are included.
+This is a worst-case upper bound that assumes the transaction has a notification recipient, so `TransactionProcessor.enqueueNotification()` actually adds a notification job. Writes without a recipient skip that enqueue plus the notification worker stage, reducing the lifecycle by roughly 10 Redis ops and 1 PG query.
 
 ### Benchmark Results (k6, single process)
 
@@ -121,15 +122,15 @@ Operational implication: multi-process or multi-node scaling should be treated a
 
 ### I/O Load Projection
 
-Using the code-path model from Section 1:
+Using the code-path model from Section 1. The table below is a worst-case upper bound that assumes every write includes a notification recipient and therefore emits a notification job:
 
 | Operation | RPS | PG queries/req | Redis ops/req | Total PG/sec | Total Redis/sec |
 |-----------|----:|---------------:|--------------:|-------------:|----------------:|
 | Write (HTTP) | 2,800 | 3 | ~7 | 8,400 | ~19,600 |
 | Write (background) | 2,800 | 3 | ~10 | 8,400 | ~28,000 |
-| Write (notification) | 2,800 | 2 | ~5 | 5,600 | ~14,000 |
+| Write (notification) | 2,800 | 1 | ~5 | 2,800 | ~14,000 |
 | Read (list) | 13,900 | 2 | 0 | 27,800 | 0 |
-| **Total** | | | | **50,200** | **~61,600** |
+| **Total** | | | | **47,400** | **~61,600** |
 
 ### Connection Math
 
@@ -168,13 +169,13 @@ Ordered by severity. Some items are code-verified risks; some are target-infrast
 
 ### 3.2 Read Load on Primary — HIGH
 
-**Modelled evidence**: 13,900 read RPS × 2 PG queries = 27,800 read queries/sec hitting the primary. That's 55% of projected PG load, all competing with writes for the same connections and I/O.
+**Modelled evidence**: 13,900 read RPS × 2 PG queries = 27,800 read queries/sec hitting the primary. That's about 59% of the worst-case projected PG load, all competing with writes for the same connections and I/O.
 
 **Root cause**: All reads go to the primary. `findMany` + `count` on growing tables with ORDER BY creates sequential scan pressure.
 
 **Solution**: Read replica
 - Route GET endpoints to replica via Prisma `$extends` or separate read-only client
-- Primary handles only writes: 8,400 + 8,400 + 5,600 = 22,400 queries/sec
+- Primary handles only writes: 8,400 + 8,400 + 2,800 = 19,600 queries/sec (worst case)
 - Replica handles reads: 27,800 queries/sec
 
 **Trade-off**: Replication lag (typically 10-100ms on RDS). Reads may return slightly stale data. For a ledger system:
@@ -197,7 +198,7 @@ Ordered by severity. Some items are code-verified risks; some are target-infrast
 
 ### 3.4 Redis — NOT A BOTTLENECK
 
-**Modelled evidence**: projected Redis volume is ~61,600 ops/sec, and the current workload uses simple queue/cache/idempotency operations.
+**Modelled evidence**: projected Redis volume is ~61,600 ops/sec in the worst-case model, and the current workload uses simple queue/cache/idempotency operations.
 
 **Action**: Redis is unlikely to be the first bottleneck, but final sizing still needs target-infra load testing and queue-depth monitoring.
 
@@ -233,7 +234,7 @@ graph TD
         DB_R["Reader DB endpoint<br/>replica connection target"]
 
         subgraph Data["Data Layer"]
-            PG_Primary[("RDS PostgreSQL 17<br/>Primary (db.r6g.large)<br/>Modelled writes: 22,400 q/sec")]
+            PG_Primary[("RDS PostgreSQL 17<br/>Primary (db.r6g.large)<br/>Modelled writes: 19,600 q/sec upper bound")]
             PG_Replica[("RDS PostgreSQL 17<br/>Read Replica<br/>Modelled reads: 27,800 q/sec")]
             Redis[("ElastiCache Redis 7<br/>(cache.r6g.large)<br/>Queue + Cache + Idempotency<br/>Modelled load: ~61,600 ops/sec")]
         end
@@ -266,7 +267,7 @@ PM2 is fine for Phase 1 (single node). For 100K users, ECS eliminates the SPOF a
 
 ### Why NOT Separate Worker Nodes
 
-Background jobs (TransactionProcessor, NotificationProcessor) are I/O-bound, not CPU-bound. Each job does 3 PG queries + Redis ops — the event loop is idle waiting for I/O most of the time.
+Background jobs (TransactionProcessor, NotificationProcessor) are I/O-bound, not CPU-bound. On the common path, transaction jobs do 3 PG queries plus Redis queue work, while notification jobs do 1 PG write attempt plus Redis queue work — the event loop is idle waiting for I/O most of the time.
 
 Separating workers onto dedicated nodes would:
 - Double the number of ECS tasks (and cost)
@@ -330,9 +331,9 @@ Keep API + workers co-located in the same process. BullMQ handles job distributi
 ```
 Slow PG → jobs process slowly → queue backlog grows
 → Redis memory fills → Redis OOM
-→ BullMQ dies → idempotency cache dies
-→ All new requests hit PG directly (no cache)
-→ PG gets even slower → death spiral
+→ BullMQ dies and idempotency lock acquisition fails
+→ New writes fail fast at Redis `SET NX`
+→ Availability drops sharply until Redis and backlog health recover
 ```
 
 **Recommended mitigation chain**:
@@ -418,7 +419,7 @@ Retention: 30 days CloudWatch Logs → S3 Glacier (90 days) → delete.
 |----------|------|---------------|------------------:|
 | ALB | Application Load Balancer | SSL termination, health checks, distributes to 6 tasks | ~$25 |
 | ECS Fargate | 6 tasks × 0.5 vCPU, 1GB | Example starting point for multi-task deployment; validate with infra benchmarks | ~$180 |
-| RDS Primary | db.r6g.large (2 vCPU, 16GB) | Example size for the modelled 22,400 write queries/sec | ~$300 |
+| RDS Primary | db.r6g.large (2 vCPU, 16GB) | Example size for the modelled 19,600 write queries/sec upper bound | ~$300 |
 | RDS Read Replica | db.r6g.large | Example size for the modelled 27,800 read queries/sec | ~$300 |
 | RDS Proxy | Default endpoint | Centralize connection management and failover handling | ~$50 |
 | ElastiCache | cache.r6g.large (2 vCPU, 13GB) | Starting point for queue + cache + idempotency workload | ~$130 |

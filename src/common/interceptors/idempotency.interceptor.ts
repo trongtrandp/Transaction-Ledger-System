@@ -12,6 +12,15 @@ import { Observable, of, from, throwError, switchMap, catchError } from 'rxjs';
 import { createHash } from 'crypto';
 import { IdempotencyService } from '../../idempotency/idempotency.service';
 
+function stableStringify(obj: unknown): string {
+  if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+  if (Array.isArray(obj)) return '[' + obj.map(stableStringify).join(',') + ']';
+  const sorted = Object.keys(obj as Record<string, unknown>)
+    .filter((k) => (obj as Record<string, unknown>)[k] !== undefined)
+    .sort();
+  return '{' + sorted.map((k) => JSON.stringify(k) + ':' + stableStringify((obj as Record<string, unknown>)[k])).join(',') + '}';
+}
+
 @Injectable()
 export class IdempotencyInterceptor implements NestInterceptor {
   private readonly logger = new Logger(IdempotencyInterceptor.name);
@@ -27,7 +36,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
     }
 
     const requestHash = createHash('sha256')
-      .update(JSON.stringify(request.body ?? {}))
+      .update(stableStringify(request.body ?? {}))
       .digest('hex');
 
     const result = await this.idempotencyService.checkAndAcquire(idempotencyKey, requestHash);

@@ -23,5 +23,6 @@ import {
   ],
   controllers: [NotificationController],
   providers: [NotificationService, NotificationProcessor],
+  exports: [BullModule],
 })
 export class NotificationModule {}

@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { NotificationProcessor } from './notification.processor';
 import { PrismaService } from '../common/prisma/prisma.service';
 import { NOTIFICATION_MAX_ATTEMPTS } from '../common/constants/queue.constants';
-import { NotificationStatus } from '../generated/prisma/client';
+import { NotificationStatus, Prisma } from '../generated/prisma/client';
 import { Job } from 'bullmq';
 
 describe('NotificationProcessor', () => {
@@ -13,7 +13,8 @@ describe('NotificationProcessor', () => {
     const mockPrisma = {
       notification: {
         create: jest.fn(),
-        count: jest.fn(),
+        findUnique: jest.fn(),
+        upsert: jest.fn(),
       },
     };
 
@@ -41,20 +42,20 @@ describe('NotificationProcessor', () => {
         attemptsMade: 0,
       } as unknown as Job;
 
-      (prisma.notification.count as jest.Mock).mockResolvedValue(0);
-      const created = { id: 'notif-1', status: NotificationStatus.DELIVERED };
+      const created = { id: 'notif-1', status: NotificationStatus.DELIVERED, attempts: 1 };
       (prisma.notification.create as jest.Mock).mockResolvedValue(created);
 
       const result = await processor.process(job);
 
       expect(prisma.notification.create).toHaveBeenCalledWith({
-        data: expect.objectContaining({
+        data: {
           transactionId: 'tx-1',
           channel: 'EMAIL',
           status: NotificationStatus.DELIVERED,
           recipient: 'user@example.com',
           payload: { type: 'DEPOSIT', amount: '100' },
-        }),
+          attempts: 1,
+        },
       });
       expect(result).toEqual({
         notificationId: 'notif-1',
@@ -74,8 +75,11 @@ describe('NotificationProcessor', () => {
         attemptsMade: 2,
       } as unknown as Job;
 
-      (prisma.notification.count as jest.Mock).mockResolvedValue(0);
-      (prisma.notification.create as jest.Mock).mockResolvedValue({ id: 'notif-2' });
+      (prisma.notification.create as jest.Mock).mockResolvedValue({
+        id: 'notif-2',
+        status: NotificationStatus.DELIVERED,
+        attempts: 3,
+      });
 
       await processor.process(job);
 
@@ -86,7 +90,7 @@ describe('NotificationProcessor', () => {
       });
     });
 
-    it('should skip when a DELIVERED notification already exists for the transaction', async () => {
+    it('should return already_delivered when P2002 unique violation is caught', async () => {
       const job = {
         id: 'job-dup',
         data: {
@@ -98,17 +102,37 @@ describe('NotificationProcessor', () => {
         attemptsMade: 0,
       } as unknown as Job;
 
-      (prisma.notification.count as jest.Mock).mockResolvedValue(1);
+      (prisma.notification.create as jest.Mock).mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: '6.0.0',
+        }),
+      );
 
       const result = await processor.process(job);
-
       expect(result).toEqual({ transactionId: 'tx-1', status: 'already_delivered' });
-      expect(prisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('should re-throw non-P2002 errors', async () => {
+      const job = {
+        id: 'job-err',
+        data: {
+          transactionId: 'tx-1',
+          channel: 'EMAIL',
+          recipient: 'user@example.com',
+          payload: {},
+        },
+        attemptsMade: 0,
+      } as unknown as Job;
+
+      (prisma.notification.create as jest.Mock).mockRejectedValue(new Error('DB connection lost'));
+
+      await expect(processor.process(job)).rejects.toThrow('DB connection lost');
     });
   });
 
   describe('onFailed', () => {
-    it('should NOT create record when attemptsMade < NOTIFICATION_MAX_ATTEMPTS', async () => {
+    it('should NOT upsert record when attemptsMade < NOTIFICATION_MAX_ATTEMPTS', async () => {
       const job = {
         id: 'job-3',
         data: {
@@ -122,10 +146,10 @@ describe('NotificationProcessor', () => {
 
       await processor.onFailed(job, new Error('temporary failure'));
 
-      expect(prisma.notification.create).not.toHaveBeenCalled();
+      expect(prisma.notification.upsert).not.toHaveBeenCalled();
     });
 
-    it('should create DEAD_LETTER record when attemptsMade >= NOTIFICATION_MAX_ATTEMPTS', async () => {
+    it('should upsert DEAD_LETTER record when attemptsMade >= NOTIFICATION_MAX_ATTEMPTS', async () => {
       const job = {
         id: 'job-4',
         data: {
@@ -138,12 +162,20 @@ describe('NotificationProcessor', () => {
       } as unknown as Job;
 
       const error = new Error('permanent failure');
-      (prisma.notification.create as jest.Mock).mockResolvedValue({});
+      (prisma.notification.findUnique as jest.Mock).mockResolvedValue(null);
+      (prisma.notification.upsert as jest.Mock).mockResolvedValue({});
 
       await processor.onFailed(job, error);
 
-      expect(prisma.notification.create).toHaveBeenCalledWith({
-        data: {
+      expect(prisma.notification.findUnique).toHaveBeenCalledWith({
+        where: { transactionId_channel: { transactionId: 'tx-4', channel: 'EMAIL' } },
+        select: { status: true },
+      });
+      expect(prisma.notification.upsert).toHaveBeenCalledWith({
+        where: {
+          transactionId_channel: { transactionId: 'tx-4', channel: 'EMAIL' },
+        },
+        create: {
           transactionId: 'tx-4',
           channel: 'EMAIL',
           status: NotificationStatus.DEAD_LETTER,
@@ -152,7 +184,33 @@ describe('NotificationProcessor', () => {
           attempts: NOTIFICATION_MAX_ATTEMPTS,
           lastError: 'permanent failure',
         },
+        update: {
+          status: NotificationStatus.DEAD_LETTER,
+          attempts: NOTIFICATION_MAX_ATTEMPTS,
+          lastError: 'permanent failure',
+        },
       });
+    });
+
+    it('should NOT overwrite DELIVERED notification with DEAD_LETTER', async () => {
+      const job = {
+        id: 'job-5',
+        data: {
+          transactionId: 'tx-5',
+          channel: 'EMAIL',
+          recipient: 'user@example.com',
+          payload: {},
+        },
+        attemptsMade: NOTIFICATION_MAX_ATTEMPTS,
+      } as unknown as Job;
+
+      (prisma.notification.findUnique as jest.Mock).mockResolvedValue({
+        status: NotificationStatus.DELIVERED,
+      });
+
+      await processor.onFailed(job, new Error('late failure'));
+
+      expect(prisma.notification.upsert).not.toHaveBeenCalled();
     });
   });
 });

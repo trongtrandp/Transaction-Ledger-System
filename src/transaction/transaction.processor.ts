@@ -36,9 +36,9 @@ export class TransactionProcessor extends WorkerHost {
       return existing;
     }
 
-    // Transition QUEUED/PROCESSING/FAILED → PROCESSING (idempotent for retries after crash)
+    // Transition QUEUED/FAILED → PROCESSING (only allow from non-active states to prevent concurrent processing)
     const started = await this.prisma.transaction.updateMany({
-      where: { id: transactionId, status: { in: [TransactionStatus.QUEUED, TransactionStatus.PROCESSING, TransactionStatus.FAILED] } },
+      where: { id: transactionId, status: { in: [TransactionStatus.QUEUED, TransactionStatus.FAILED] } },
       data: { status: TransactionStatus.PROCESSING },
     });
     if (started.count === 0) {

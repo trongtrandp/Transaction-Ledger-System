@@ -24,6 +24,7 @@ describe('IdempotencyService', () => {
         create: jest.fn(),
         update: jest.fn(),
         delete: jest.fn(),
+        deleteMany: jest.fn(),
       },
     };
 
@@ -32,7 +33,7 @@ describe('IdempotencyService', () => {
         IdempotencyService,
         { provide: RedisService, useValue: mockRedis },
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: ConfigService, useValue: { get: () => 24 } },
+        { provide: ConfigService, useValue: { get: (key: string, defaultVal: unknown) => defaultVal ?? 24 } },
       ],
     }).compile();
 
@@ -90,6 +91,7 @@ describe('IdempotencyService', () => {
         requestHash: 'hash-abc',
         statusCode: 202,
         response: { id: '1' },
+        expiresAt: new Date(Date.now() + 86400_000),
       });
 
       const result = await service.checkAndAcquire('key-1', 'hash-abc');
@@ -111,6 +113,7 @@ describe('IdempotencyService', () => {
         requestHash: 'hash-abc',
         statusCode: 202,
         response: { id: '1' },
+        expiresAt: new Date(Date.now() + 86400_000),
       });
 
       const result = await service.checkAndAcquire('key-1', 'hash-abc');
@@ -124,6 +127,35 @@ describe('IdempotencyService', () => {
 
       const result = await service.checkAndAcquire('key-1', 'hash-abc');
       expect(result.status).toBe('in_progress');
+    });
+
+    it('should cleanup and return in_progress for expired DB record', async () => {
+      redis.setNX.mockResolvedValue(false);
+      redis.get.mockResolvedValue(null);
+      (prisma.idempotencyRecord.findUnique as jest.Mock).mockResolvedValue({
+        key: 'key-1',
+        requestHash: 'hash-abc',
+        statusCode: 202,
+        response: { id: '1' },
+        expiresAt: new Date(Date.now() - 3600_000), // expired 1 hour ago
+      });
+      (prisma.idempotencyRecord.delete as jest.Mock).mockResolvedValue({});
+      redis.del.mockResolvedValue(undefined);
+
+      const result = await service.checkAndAcquire('key-1', 'hash-abc');
+      expect(result.status).toBe('in_progress');
+      expect(prisma.idempotencyRecord.delete).toHaveBeenCalledWith({ where: { key: 'key-1' } });
+      expect(redis.del).toHaveBeenCalledWith('idempotency:key-1');
+    });
+
+    it('should rollback Redis and re-throw on non-P2002 DB error during acquire', async () => {
+      redis.setNX.mockResolvedValue(true);
+      const dbError = new Error('DB connection lost');
+      (prisma.idempotencyRecord.create as jest.Mock).mockRejectedValue(dbError);
+      redis.del.mockResolvedValue(undefined);
+
+      await expect(service.checkAndAcquire('key-1', 'hash-abc')).rejects.toThrow('DB connection lost');
+      expect(redis.del).toHaveBeenCalledWith('idempotency:key-1');
     });
   });
 
@@ -185,7 +217,7 @@ describe('IdempotencyService', () => {
     });
   });
 
-  describe('stale placeholder cleanup', () => {
+  describe('stale placeholder handling', () => {
     it('should return in_progress for recent placeholder without statusCode', async () => {
       redis.setNX.mockResolvedValue(false);
       redis.get.mockResolvedValue(null);
@@ -194,14 +226,14 @@ describe('IdempotencyService', () => {
         requestHash: 'hash-abc',
         statusCode: null,
         createdAt: new Date(), // just created
+        expiresAt: new Date(Date.now() + 86400_000),
       });
 
       const result = await service.checkAndAcquire('key-1', 'hash-abc');
       expect(result.status).toBe('in_progress');
-      expect(prisma.idempotencyRecord.delete).not.toHaveBeenCalled();
     });
 
-    it('should clean up stale placeholder and return miss for retry', async () => {
+    it('should return in_progress for stale placeholder (no unsafe cleanup)', async () => {
       redis.setNX.mockResolvedValue(false);
       redis.get.mockResolvedValue(null);
       (prisma.idempotencyRecord.findUnique as jest.Mock).mockResolvedValue({
@@ -209,13 +241,33 @@ describe('IdempotencyService', () => {
         requestHash: 'hash-abc',
         statusCode: null,
         createdAt: new Date(Date.now() - 120_000), // 2 minutes old
+        expiresAt: new Date(Date.now() + 86400_000),
       });
-      (prisma.idempotencyRecord.delete as jest.Mock).mockResolvedValue({});
-      redis.del.mockResolvedValue(undefined);
 
       const result = await service.checkAndAcquire('key-1', 'hash-abc');
-      expect(result.status).toBe('miss');
-      expect(prisma.idempotencyRecord.delete).toHaveBeenCalledWith({ where: { key: 'key-1' } });
+      expect(result.status).toBe('in_progress');
+      expect(prisma.idempotencyRecord.delete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cleanupExpiredRecords', () => {
+    it('should delete expired records and return count', async () => {
+      (prisma.idempotencyRecord.deleteMany as jest.Mock).mockResolvedValue({ count: 5 });
+
+      const result = await service.cleanupExpiredRecords();
+
+      expect(result).toBe(5);
+      expect(prisma.idempotencyRecord.deleteMany).toHaveBeenCalledWith({
+        where: { expiresAt: { lte: expect.any(Date) } },
+      });
+    });
+
+    it('should return 0 when no expired records exist', async () => {
+      (prisma.idempotencyRecord.deleteMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+      const result = await service.cleanupExpiredRecords();
+
+      expect(result).toBe(0);
     });
   });
 });

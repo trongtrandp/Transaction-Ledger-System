@@ -47,8 +47,8 @@ graph TD
         end
 
         subgraph Workers["BullMQ Workers"]
-            TX_PROC["TransactionProcessor (concurrency: 5)<br/>DB read + status updates<br/>→ Enqueue notification"]
-            NTF_PROC["NotificationProcessor (concurrency: 5)<br/>DB dedup check + INSERT notification"]
+            TX_PROC["TransactionProcessor (concurrency: 5)<br/>DB read + status updates<br/>→ Enqueue notification if recipient exists"]
+            NTF_PROC["NotificationProcessor (concurrency: 5)<br/>DB INSERT notification<br/>+ unique-constraint dedupe"]
             TX_PROC --> NTF_PROC
         end
     end
@@ -133,29 +133,29 @@ sequenceDiagram
     alt Transaction not found
         TP-->>TP: skip + log error
     else Transaction status = COMPLETED
-        TP->>NQ: enqueue notification job (deduped)
-    else Transaction status = QUEUED/PROCESSING/FAILED
+        TP->>NQ: enqueue notification job if recipient exists (deduped)
+    else Transaction status = QUEUED/FAILED
         TP->>DB: UPDATE status → PROCESSING
         TP->>DB: UPDATE status → COMPLETED
-        TP->>NQ: enqueue notification job (deduped)
+        TP->>NQ: enqueue notification job if recipient exists (deduped)
     end
     TP-->>-Q: job done
 
     NQ->>+NP: dequeue notification job
-    alt Already delivered
-        NP-->>NP: skip (idempotent)
-    else Not delivered
-        NP->>DB: COUNT delivered notifications
-        NP->>DB: INSERT notification (DELIVERED)
+    NP->>DB: INSERT notification (DELIVERED)
+    alt Unique constraint hit
+        NP-->>NP: treat as already delivered
+    else Insert succeeded
+        NP-->>NP: delivered
     end
     alt Failure (max retries)
-        NP->>DB: INSERT notification (DEAD_LETTER)
+        NP->>DB: UPSERT notification (DEAD_LETTER)
     end
     NP-->>-NQ: job done
 ```
 
-- **TransactionProcessor** (concurrency: 5): Loads the transaction, short-circuits missing/already-completed jobs, updates QUEUED/PROCESSING/FAILED → COMPLETED, then enqueues a notification with deterministic deduplication
-- **NotificationProcessor** (concurrency: 5): Checks for an existing delivered notification, creates DELIVERED on success, or creates DEAD_LETTER after retries are exhausted
+- **TransactionProcessor** (concurrency: 5): Loads the transaction, short-circuits missing/already-completed jobs, transitions `QUEUED`/`FAILED` → `PROCESSING` → `COMPLETED`, then enqueues a notification with deterministic deduplication only when a recipient is present
+- **NotificationProcessor** (concurrency: 5): Attempts `create()` for `DELIVERED`, treats unique-constraint conflicts as already delivered, and `upsert()`s `DEAD_LETTER` after retries are exhausted
 
 ## Idempotency
 
@@ -190,7 +190,7 @@ flowchart TD
 
 **IdempotencyInterceptor** (request-level): Extracts `Idempotency-Key` header, computes SHA256 hash of request body, delegates to service for lock/cache logic, stores response after handler completes, releases lock on error.
 
-**IdempotencyService** (logic-level): `checkAndAcquire()` atomic Redis SET NX + DB placeholder, `store()` DB update + Redis cache, `release()` cleanup on failure, `inspectExisting()` check state from Redis/DB, handles stale placeholders (>60s auto-cleanup).
+**IdempotencyService** (logic-level): `checkAndAcquire()` atomic Redis SET NX + DB placeholder with `expiresAt`, `store()` DB update + Redis cache, `release()` cleanup on failure, `inspectExisting()` check state from Redis/DB, returns `in_progress` for stale placeholders, and deletes expired records hourly via `cleanupExpiredRecords()`.
 
 ## Database Schema
 
@@ -230,6 +230,7 @@ erDiagram
         String requestHash
         Int statusCode "nullable"
         Json response "nullable"
+        DateTime expiresAt
         DateTime createdAt
         DateTime updatedAt
     }

@@ -1,16 +1,17 @@
-import { IsEnum, IsNotEmpty, IsObject, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { IsEnum, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { TransactionType } from '../../generated/prisma/client';
+import { IsPositiveDecimalString } from '../../common/validators/is-positive-decimal-string.validator';
 
 export class CreateTransactionDto {
   @ApiProperty({ enum: TransactionType })
   @IsEnum(TransactionType)
   type!: TransactionType;
 
-  @ApiProperty({ example: '100.50', description: 'Decimal string, max 8 decimal places' })
+  @ApiProperty({ example: '100.50', description: 'Positive decimal string, max 12 integer + 8 decimal digits' })
   @IsNotEmpty()
   @IsString()
-  @Matches(/^\d+(\.\d{1,8})?$/, { message: 'amount must be a positive decimal string with up to 8 decimal places' })
+  @IsPositiveDecimalString()
   amount!: string;
 
   @ApiProperty({ example: 'USD', maxLength: 10 })
@@ -20,13 +21,15 @@ export class CreateTransactionDto {
   currency!: string;
 
   @ApiPropertyOptional({ example: 'ACC-001' })
-  @IsOptional()
+  @ValidateIf((o) => o.type === TransactionType.TRANSFER || o.type === TransactionType.WITHDRAWAL)
+  @IsNotEmpty({ message: 'fromAccount is required for TRANSFER and WITHDRAWAL' })
   @IsString()
   @MaxLength(255)
   fromAccount?: string;
 
   @ApiPropertyOptional({ example: 'ACC-002' })
-  @IsOptional()
+  @ValidateIf((o) => o.type === TransactionType.TRANSFER || o.type === TransactionType.DEPOSIT)
+  @IsNotEmpty({ message: 'toAccount is required for TRANSFER and DEPOSIT' })
   @IsString()
   @MaxLength(255)
   toAccount?: string;

@@ -7,8 +7,141 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { of, throwError, firstValueFrom } from 'rxjs';
+import { createHash } from 'crypto';
 import { IdempotencyInterceptor } from './idempotency.interceptor';
 import { IdempotencyService } from '../../idempotency/idempotency.service';
+
+// Helper to compute the same hash the interceptor uses
+function expectedHash(body: unknown): string {
+  // Import stableStringify indirectly by hashing through the interceptor's logic
+  // We replicate stableStringify here to verify deterministic output
+  function stableStringify(obj: unknown): string {
+    if (obj === null || typeof obj !== 'object') return JSON.stringify(obj);
+    if (Array.isArray(obj)) return '[' + obj.map(stableStringify).join(',') + ']';
+    const sorted = Object.keys(obj as Record<string, unknown>)
+      .filter((k) => (obj as Record<string, unknown>)[k] !== undefined)
+      .sort();
+    return '{' + sorted.map((k) => JSON.stringify(k) + ':' + stableStringify((obj as Record<string, unknown>)[k])).join(',') + '}';
+  }
+  return createHash('sha256').update(stableStringify(body)).digest('hex');
+}
+
+describe('stableStringify (via interceptor hashing)', () => {
+  let interceptor: IdempotencyInterceptor;
+  let mockIdempotencyService: Record<string, jest.Mock>;
+
+  beforeEach(async () => {
+    mockIdempotencyService = {
+      checkAndAcquire: jest.fn().mockResolvedValue({ status: 'miss' }),
+      store: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn(),
+    };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        IdempotencyInterceptor,
+        { provide: IdempotencyService, useValue: mockIdempotencyService },
+      ],
+    }).compile();
+
+    interceptor = module.get<IdempotencyInterceptor>(IdempotencyInterceptor);
+  });
+
+  function makeContext(body: unknown) {
+    const mockCallHandler = { handle: jest.fn().mockReturnValue(of({ ok: true })) } as unknown as CallHandler;
+    const ctx = {
+      switchToHttp: jest.fn().mockReturnValue({
+        getRequest: jest.fn().mockReturnValue({ headers: { 'idempotency-key': 'k1' }, body }),
+        getResponse: jest.fn().mockReturnValue({ status: jest.fn(), statusCode: 201 }),
+      }),
+    } as unknown as ExecutionContext;
+    return { ctx, mockCallHandler };
+  }
+
+  it('should produce same hash regardless of key order', async () => {
+    const body1 = { b: 2, a: 1 };
+    const body2 = { a: 1, b: 2 };
+
+    const { ctx: ctx1, mockCallHandler: h1 } = makeContext(body1);
+    await interceptor.intercept(ctx1, h1);
+    const hash1 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    mockIdempotencyService.checkAndAcquire.mockClear();
+
+    const { ctx: ctx2, mockCallHandler: h2 } = makeContext(body2);
+    await interceptor.intercept(ctx2, h2);
+    const hash2 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    expect(hash1).toBe(hash2);
+  });
+
+  it('should produce same hash for deeply nested objects with different key order', async () => {
+    const body1 = { outer: { z: 3, a: 1 }, list: [1, 2] };
+    const body2 = { list: [1, 2], outer: { a: 1, z: 3 } };
+
+    const { ctx: ctx1, mockCallHandler: h1 } = makeContext(body1);
+    await interceptor.intercept(ctx1, h1);
+    const hash1 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    mockIdempotencyService.checkAndAcquire.mockClear();
+
+    const { ctx: ctx2, mockCallHandler: h2 } = makeContext(body2);
+    await interceptor.intercept(ctx2, h2);
+    const hash2 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    expect(hash1).toBe(hash2);
+  });
+
+  it('should produce different hashes for different values', async () => {
+    const { ctx: ctx1, mockCallHandler: h1 } = makeContext({ a: 1 });
+    await interceptor.intercept(ctx1, h1);
+    const hash1 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    mockIdempotencyService.checkAndAcquire.mockClear();
+
+    const { ctx: ctx2, mockCallHandler: h2 } = makeContext({ a: 2 });
+    await interceptor.intercept(ctx2, h2);
+    const hash2 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it('should handle null body (coalesced to empty object)', async () => {
+    const { ctx, mockCallHandler } = makeContext(null);
+    await interceptor.intercept(ctx, mockCallHandler);
+    // interceptor uses `request.body ?? {}`, so null becomes {}
+    expect(mockIdempotencyService.checkAndAcquire).toHaveBeenCalledWith('k1', expectedHash({}));
+  });
+
+  it('should handle empty object', async () => {
+    const { ctx, mockCallHandler } = makeContext({});
+    await interceptor.intercept(ctx, mockCallHandler);
+    expect(mockIdempotencyService.checkAndAcquire).toHaveBeenCalledWith('k1', expectedHash({}));
+  });
+
+  it('should handle arrays correctly', async () => {
+    const { ctx, mockCallHandler } = makeContext([3, 1, 2]);
+    await interceptor.intercept(ctx, mockCallHandler);
+    expect(mockIdempotencyService.checkAndAcquire).toHaveBeenCalledWith('k1', expectedHash([3, 1, 2]));
+  });
+
+  it('should strip undefined values (matching JSON.stringify behavior)', async () => {
+    const body1 = { a: 1, b: undefined };
+    const body2 = { a: 1 };
+
+    const { ctx: ctx1, mockCallHandler: h1 } = makeContext(body1);
+    await interceptor.intercept(ctx1, h1);
+    const hash1 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    mockIdempotencyService.checkAndAcquire.mockClear();
+
+    const { ctx: ctx2, mockCallHandler: h2 } = makeContext(body2);
+    await interceptor.intercept(ctx2, h2);
+    const hash2 = mockIdempotencyService.checkAndAcquire.mock.calls[0][1];
+
+    expect(hash1).toBe(hash2);
+  });
+});
 
 describe('IdempotencyInterceptor', () => {
   let interceptor: IdempotencyInterceptor;
