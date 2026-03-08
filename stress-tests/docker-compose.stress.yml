@@ -1,0 +1,38 @@
+services:
+  stress-postgres:
+    image: postgres:17-alpine
+    container_name: stress-postgres
+    ports:
+      - '5433:5432'
+    environment:
+      POSTGRES_USER: stress
+      POSTGRES_PASSWORD: stress
+      POSTGRES_DB: stress_ledger
+    tmpfs:
+      - /var/lib/postgresql/data
+    command: >
+      postgres
+      -c max_connections=300
+      -c shared_buffers=256MB
+      -c work_mem=4MB
+      -c synchronous_commit=off
+      -c wal_buffers=16MB
+      -c checkpoint_completion_target=0.9
+      -c random_page_cost=1.1
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U stress -d stress_ledger']
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  stress-redis:
+    image: redis:7-alpine
+    container_name: stress-redis
+    ports:
+      - '6380:6379'
+    command: redis-server --save "" --appendonly no --tcp-backlog 511 --maxmemory-policy noeviction
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 5s
+      retries: 10

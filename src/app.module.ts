@@ -3,9 +3,14 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
+import { ScheduleModule } from '@nestjs/schedule';
 import * as Joi from 'joi';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { RedisModule } from './common/redis/redis.module';
 import { HealthModule } from './health/health.module';
+import { IdempotencyModule } from './idempotency/idempotency.module';
+import { TransactionModule } from './transaction/transaction.module';
+import { NotificationModule } from './notification/notification.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 
@@ -21,6 +26,9 @@ import { AppService } from './app.service';
         REDIS_PORT: Joi.number().default(6379),
         THROTTLE_TTL: Joi.number().default(60000),
         THROTTLE_LIMIT: Joi.number().default(10),
+        IDEMPOTENCY_TTL_HOURS: Joi.number().integer().min(1).default(24),
+        IDEMPOTENCY_STALE_THRESHOLD_MS: Joi.number().integer().min(1000).default(60000),
+        DB_POOL_SIZE: Joi.number().integer().min(1).default(20),
       }),
     }),
     ThrottlerModule.forRootAsync({
@@ -44,7 +52,12 @@ import { AppService } from './app.service';
       }),
     }),
     PrismaModule,
+    RedisModule,
+    ScheduleModule.forRoot(),
     HealthModule,
+    IdempotencyModule,
+    TransactionModule,
+    NotificationModule,
   ],
   controllers: [AppController],
   providers: [

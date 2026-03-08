@@ -7,3 +7,89 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+// ─── Enums ───────────────────────────────────────────────
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL
+  TRANSFER
+  REFUND
+}
+
+enum TransactionStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+  WEBHOOK
+}
+
+enum NotificationStatus {
+  PENDING
+  PROCESSING
+  DELIVERED
+  FAILED
+  DEAD_LETTER
+}
+
+// ─── Models ──────────────────────────────────────────────
+
+model Transaction {
+  id            String            @id @default(uuid()) @db.Uuid
+  type          TransactionType
+  status        TransactionStatus @default(QUEUED)
+  amount        Decimal           @db.Decimal(20, 8)
+  currency      String            @db.VarChar(10)
+  fromAccount   String?           @map("from_account") @db.VarChar(255)
+  toAccount     String?           @map("to_account") @db.VarChar(255)
+  metadata      Json?
+  createdAt     DateTime          @default(now()) @map("created_at")
+  updatedAt     DateTime          @updatedAt @map("updated_at")
+
+  notifications Notification[]
+
+  @@index([status, createdAt])
+  @@index([fromAccount])
+  @@index([toAccount])
+  @@map("transactions")
+}
+
+model IdempotencyRecord {
+  id           String   @id @default(uuid()) @db.Uuid
+  key          String   @unique @db.VarChar(255)
+  requestHash  String   @map("request_hash") @db.VarChar(64)
+  statusCode   Int?     @map("status_code")
+  response     Json?
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@index([expiresAt])
+  @@map("idempotency_records")
+}
+
+model Notification {
+  id            String              @id @default(uuid()) @db.Uuid
+  transactionId String              @map("transaction_id") @db.Uuid
+  channel       NotificationChannel
+  status        NotificationStatus  @default(PENDING)
+  recipient     String              @db.VarChar(255)
+  payload       Json?
+  attempts      Int                 @default(0)
+  lastError     String?             @map("last_error")
+  createdAt     DateTime            @default(now()) @map("created_at")
+  updatedAt     DateTime            @updatedAt @map("updated_at")
+
+  transaction   Transaction         @relation(fields: [transactionId], references: [id])
+
+  @@unique([transactionId, channel])
+  @@index([status, channel])
+  @@map("notifications")
+}
