@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+.git
+.github
+.vscode
+.idea
+.env
+.env.*
+!.env.example
+*.md
+*.log
+.DS_Store
+.claude
+.codegraph
