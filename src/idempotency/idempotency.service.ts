@@ -26,7 +26,10 @@ export class IdempotencyService {
   ) {
     const ttlHours = this.configService.get<number>('IDEMPOTENCY_TTL_HOURS', 24);
     this.ttlSeconds = ttlHours * 3600;
-    this.staleThresholdMs = this.configService.get<number>('IDEMPOTENCY_STALE_THRESHOLD_MS', 60_000);
+    this.staleThresholdMs = this.configService.get<number>(
+      'IDEMPOTENCY_STALE_THRESHOLD_MS',
+      60_000,
+    );
   }
 
   private redisKey(key: string) {
@@ -53,10 +56,7 @@ export class IdempotencyService {
         return { status: 'miss' }; // Lock acquired, proceed with request
       } catch (error: unknown) {
         // Unique constraint violation → another process inserted first
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === 'P2002'
-        ) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
           await this.redis.del(this.redisKey(key));
           // Skip Redis (just deleted) — go straight to DB
           return this.inspectFromDb(key, requestHash);
@@ -116,7 +116,9 @@ export class IdempotencyService {
       // Manual intervention is required to resolve truly abandoned placeholders.
       const ageMs = Date.now() - record.createdAt.getTime();
       if (ageMs > this.staleThresholdMs) {
-        this.logger.warn(`Stale idempotency placeholder for key ${key} (${ageMs}ms old), returning in_progress — manual cleanup may be needed`);
+        this.logger.warn(
+          `Stale idempotency placeholder for key ${key} (${ageMs}ms old), returning in_progress — manual cleanup may be needed`,
+        );
       }
       return { status: 'in_progress' };
     }
@@ -174,10 +176,7 @@ export class IdempotencyService {
     try {
       await this.prisma.idempotencyRecord.delete({ where: { key } });
     } catch (error: unknown) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2025'
-      ) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') {
         // Record doesn't exist — fine
       } else {
         this.logger.warn(`Failed to delete idempotency record ${key}: ${error}`);

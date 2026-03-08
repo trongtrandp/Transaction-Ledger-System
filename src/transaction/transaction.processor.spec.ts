@@ -1,5 +1,10 @@
 jest.mock('../generated/prisma/client', () => ({
-  TransactionStatus: { COMPLETED: 'COMPLETED', PROCESSING: 'PROCESSING', QUEUED: 'QUEUED', FAILED: 'FAILED' },
+  TransactionStatus: {
+    COMPLETED: 'COMPLETED',
+    PROCESSING: 'PROCESSING',
+    QUEUED: 'QUEUED',
+    FAILED: 'FAILED',
+  },
   NotificationChannel: { EMAIL: 'EMAIL' },
   Prisma: { Decimal: jest.fn().mockImplementation((val) => ({ toString: () => val })) },
   PrismaClient: class PrismaClientMock {},
@@ -96,8 +101,11 @@ describe('TransactionProcessor', () => {
       (prisma.transaction.findUnique as jest.Mock).mockResolvedValue(existing);
       (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       const completed = {
-        id: 'tx-1', type: 'DEPOSIT', status: TransactionStatus.COMPLETED,
-        amount: { toString: () => '100.50' }, currency: 'USD',
+        id: 'tx-1',
+        type: 'DEPOSIT',
+        status: TransactionStatus.COMPLETED,
+        amount: { toString: () => '100.50' },
+        currency: 'USD',
       };
       (prisma.transaction.update as jest.Mock).mockResolvedValue(completed);
       notificationQueue.add.mockResolvedValue({});
@@ -134,8 +142,11 @@ describe('TransactionProcessor', () => {
       (prisma.transaction.findUnique as jest.Mock).mockResolvedValue(existing);
       (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       const completed = {
-        id: 'tx-1', type: 'DEPOSIT', status: TransactionStatus.COMPLETED,
-        amount: { toString: () => '50' }, currency: 'EUR',
+        id: 'tx-1',
+        type: 'DEPOSIT',
+        status: TransactionStatus.COMPLETED,
+        amount: { toString: () => '50' },
+        currency: 'EUR',
       };
       (prisma.transaction.update as jest.Mock).mockResolvedValue(completed);
 
@@ -151,8 +162,11 @@ describe('TransactionProcessor', () => {
       (prisma.transaction.findUnique as jest.Mock).mockResolvedValue(existing);
       (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       const completed = {
-        id: 'tx-1', type: 'DEPOSIT', status: TransactionStatus.COMPLETED,
-        amount: { toString: () => '100.50' }, currency: 'USD',
+        id: 'tx-1',
+        type: 'DEPOSIT',
+        status: TransactionStatus.COMPLETED,
+        amount: { toString: () => '100.50' },
+        currency: 'USD',
       };
       (prisma.transaction.update as jest.Mock).mockResolvedValue(completed);
       notificationQueue.add.mockResolvedValue({});
@@ -172,8 +186,11 @@ describe('TransactionProcessor', () => {
       (prisma.transaction.findUnique as jest.Mock).mockResolvedValue(existing);
       (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
       const completed = {
-        id: 'tx-1', type: 'DEPOSIT', status: TransactionStatus.COMPLETED,
-        amount: { toString: () => '200' }, currency: 'GBP',
+        id: 'tx-1',
+        type: 'DEPOSIT',
+        status: TransactionStatus.COMPLETED,
+        amount: { toString: () => '200' },
+        currency: 'GBP',
       };
       (prisma.transaction.update as jest.Mock).mockResolvedValue(completed);
       notificationQueue.add.mockResolvedValue({});
@@ -194,7 +211,11 @@ describe('TransactionProcessor', () => {
     it('should update transaction to FAILED status', async () => {
       (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
 
-      const job = { id: 'job-8', data: { transactionId: 'tx-fail' }, attemptsMade: 1 } as unknown as Job;
+      const job = {
+        id: 'job-8',
+        data: { transactionId: 'tx-fail' },
+        attemptsMade: 1,
+      } as unknown as Job;
       await processor.onFailed(job, new Error('processing error'));
 
       expect(prisma.transaction.updateMany).toHaveBeenCalledWith({
@@ -206,14 +227,22 @@ describe('TransactionProcessor', () => {
     it('should not re-throw when updateMany throws', async () => {
       (prisma.transaction.updateMany as jest.Mock).mockRejectedValue(new Error('db down'));
 
-      const job = { id: 'job-9', data: { transactionId: 'tx-err' }, attemptsMade: 2 } as unknown as Job;
+      const job = {
+        id: 'job-9',
+        data: { transactionId: 'tx-err' },
+        attemptsMade: 2,
+      } as unknown as Job;
       await expect(processor.onFailed(job, new Error('fail'))).resolves.not.toThrow();
     });
 
     it('should call updateMany with where clause excluding COMPLETED status', async () => {
       (prisma.transaction.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
 
-      const job = { id: 'job-10', data: { transactionId: 'tx-done' }, attemptsMade: 1 } as unknown as Job;
+      const job = {
+        id: 'job-10',
+        data: { transactionId: 'tx-done' },
+        attemptsMade: 1,
+      } as unknown as Job;
       await processor.onFailed(job, new Error('some error'));
 
       expect(prisma.transaction.updateMany).toHaveBeenCalledWith(

@@ -21,7 +21,13 @@ function expectedHash(body: unknown): string {
     const sorted = Object.keys(obj as Record<string, unknown>)
       .filter((k) => (obj as Record<string, unknown>)[k] !== undefined)
       .sort();
-    return '{' + sorted.map((k) => JSON.stringify(k) + ':' + stableStringify((obj as Record<string, unknown>)[k])).join(',') + '}';
+    return (
+      '{' +
+      sorted
+        .map((k) => JSON.stringify(k) + ':' + stableStringify((obj as Record<string, unknown>)[k]))
+        .join(',') +
+      '}'
+    );
   }
   return createHash('sha256').update(stableStringify(body)).digest('hex');
 }
@@ -48,7 +54,9 @@ describe('stableStringify (via interceptor hashing)', () => {
   });
 
   function makeContext(body: unknown) {
-    const mockCallHandler = { handle: jest.fn().mockReturnValue(of({ ok: true })) } as unknown as CallHandler;
+    const mockCallHandler = {
+      handle: jest.fn().mockReturnValue(of({ ok: true })),
+    } as unknown as CallHandler;
     const ctx = {
       switchToHttp: jest.fn().mockReturnValue({
         getRequest: jest.fn().mockReturnValue({ headers: { 'idempotency-key': 'k1' }, body }),
@@ -122,7 +130,10 @@ describe('stableStringify (via interceptor hashing)', () => {
   it('should handle arrays correctly', async () => {
     const { ctx, mockCallHandler } = makeContext([3, 1, 2]);
     await interceptor.intercept(ctx, mockCallHandler);
-    expect(mockIdempotencyService.checkAndAcquire).toHaveBeenCalledWith('k1', expectedHash([3, 1, 2]));
+    expect(mockIdempotencyService.checkAndAcquire).toHaveBeenCalledWith(
+      'k1',
+      expectedHash([3, 1, 2]),
+    );
   });
 
   it('should strip undefined values (matching JSON.stringify behavior)', async () => {
@@ -283,5 +294,4 @@ describe('IdempotencyInterceptor', () => {
     await expect(firstValueFrom(result$)).rejects.toThrow('handler error');
     expect(mockIdempotencyService.release).toHaveBeenCalledWith('test-key');
   });
-
 });

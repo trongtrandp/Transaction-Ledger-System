@@ -17,6 +17,7 @@ jest.mock('../../generated/prisma/client', () => {
     PrismaClient: class MockPrismaClient {
       $connect = mockConnect;
       $disconnect = mockDisconnect;
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       constructor(_opts?: unknown) {}
     },
   };

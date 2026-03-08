@@ -41,10 +41,7 @@ export class NotificationProcessor extends WorkerHost {
       this.logger.log(`Notification ${notification.id} delivered`);
       return { notificationId: notification.id, status: NotificationStatus.DELIVERED };
     } catch (error: unknown) {
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002'
-      ) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
         this.logger.log(`Notification already exists for transaction ${transactionId}, skipping`);
         return { transactionId, status: 'already_delivered' };
       }
@@ -54,10 +51,14 @@ export class NotificationProcessor extends WorkerHost {
 
   @OnWorkerEvent('failed')
   async onFailed(job: Job, error: Error) {
-    this.logger.warn(`Notification job ${job.id} failed (attempt ${job.attemptsMade}): ${error.message}`);
+    this.logger.warn(
+      `Notification job ${job.id} failed (attempt ${job.attemptsMade}): ${error.message}`,
+    );
 
     if (job.attemptsMade >= NOTIFICATION_MAX_ATTEMPTS) {
-      this.logger.error(`Notification job ${job.id} moved to dead letter after ${NOTIFICATION_MAX_ATTEMPTS} attempts`);
+      this.logger.error(
+        `Notification job ${job.id} moved to dead letter after ${NOTIFICATION_MAX_ATTEMPTS} attempts`,
+      );
 
       const { transactionId, channel, recipient, payload } = job.data;
 
@@ -70,7 +71,9 @@ export class NotificationProcessor extends WorkerHost {
       });
 
       if (existing?.status === NotificationStatus.DELIVERED) {
-        this.logger.log(`Notification for transaction ${transactionId} already delivered, skipping dead letter`);
+        this.logger.log(
+          `Notification for transaction ${transactionId} already delivered, skipping dead letter`,
+        );
         return;
       }
 
