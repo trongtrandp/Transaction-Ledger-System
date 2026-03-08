@@ -1,4 +1,12 @@
-import { IsEnum, IsNotEmpty, IsObject, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsObject,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ValidateIf,
+} from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { TransactionType } from '../../generated/prisma/client';
 import { IsPositiveDecimalString } from '../../common/validators/is-positive-decimal-string.validator';
@@ -8,7 +16,10 @@ export class CreateTransactionDto {
   @IsEnum(TransactionType)
   type!: TransactionType;
 
-  @ApiProperty({ example: '100.50', description: 'Positive decimal string, max 12 integer + 8 decimal digits' })
+  @ApiProperty({
+    example: '100.50',
+    description: 'Positive decimal string, max 12 integer + 8 decimal digits',
+  })
   @IsNotEmpty()
   @IsString()
   @IsPositiveDecimalString()

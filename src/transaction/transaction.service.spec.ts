@@ -55,12 +55,15 @@ describe('TransactionService', () => {
           currency: 'USD',
         }),
       });
-      expect(queue.add).toHaveBeenCalledWith(PROCESS_TRANSACTION_JOB, expect.objectContaining({
-        transactionId: result.id,
-        type: 'DEPOSIT',
-        amount: '100.50',
-        currency: 'USD',
-      }));
+      expect(queue.add).toHaveBeenCalledWith(
+        PROCESS_TRANSACTION_JOB,
+        expect.objectContaining({
+          transactionId: result.id,
+          type: 'DEPOSIT',
+          amount: '100.50',
+          currency: 'USD',
+        }),
+      );
     });
   });
 
@@ -93,7 +96,12 @@ describe('TransactionService', () => {
       (prisma.transaction.findMany as jest.Mock).mockResolvedValue([]);
       (prisma.transaction.count as jest.Mock).mockResolvedValue(0);
 
-      await service.findAll({ page: 1, limit: 10, status: 'COMPLETED' as never, type: 'DEPOSIT' as never });
+      await service.findAll({
+        page: 1,
+        limit: 10,
+        status: 'COMPLETED' as never,
+        type: 'DEPOSIT' as never,
+      });
 
       expect(prisma.transaction.findMany).toHaveBeenCalledWith(
         expect.objectContaining({

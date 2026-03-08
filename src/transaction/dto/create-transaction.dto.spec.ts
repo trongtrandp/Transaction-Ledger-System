@@ -61,19 +61,25 @@ describe('CreateTransactionDto', () => {
     });
 
     it('should reject DEPOSIT without toAccount', async () => {
-      await expectInvalid({
-        type: TransactionType.DEPOSIT,
-        amount: '10',
-        currency: 'USD',
-      }, 'toAccount');
+      await expectInvalid(
+        {
+          type: TransactionType.DEPOSIT,
+          amount: '10',
+          currency: 'USD',
+        },
+        'toAccount',
+      );
     });
 
     it('should reject WITHDRAWAL without fromAccount', async () => {
-      await expectInvalid({
-        type: TransactionType.WITHDRAWAL,
-        amount: '10',
-        currency: 'USD',
-      }, 'fromAccount');
+      await expectInvalid(
+        {
+          type: TransactionType.WITHDRAWAL,
+          amount: '10',
+          currency: 'USD',
+        },
+        'fromAccount',
+      );
     });
   });
 

@@ -18,7 +18,13 @@ function stableStringify(obj: unknown): string {
   const sorted = Object.keys(obj as Record<string, unknown>)
     .filter((k) => (obj as Record<string, unknown>)[k] !== undefined)
     .sort();
-  return '{' + sorted.map((k) => JSON.stringify(k) + ':' + stableStringify((obj as Record<string, unknown>)[k])).join(',') + '}';
+  return (
+    '{' +
+    sorted
+      .map((k) => JSON.stringify(k) + ':' + stableStringify((obj as Record<string, unknown>)[k]))
+      .join(',') +
+    '}'
+  );
 }
 
 @Injectable()
@@ -62,14 +68,21 @@ export class IdempotencyInterceptor implements NestInterceptor {
       switchMap((responseBody) => {
         const response = context.switchToHttp().getResponse();
         return from(
-          this.idempotencyService.store(idempotencyKey, requestHash, response.statusCode, responseBody),
+          this.idempotencyService.store(
+            idempotencyKey,
+            requestHash,
+            response.statusCode,
+            responseBody,
+          ),
         ).pipe(
           switchMap(() => of(responseBody)),
           catchError((storeErr) => {
             // store() failed, but the transaction is already created and queued.
             // Keep the idempotency placeholder record (no statusCode) so retries
             // see 'in_progress' instead of treating it as a new request.
-            this.logger.error(`Failed to store idempotency response for key ${idempotencyKey}: ${storeErr}`);
+            this.logger.error(
+              `Failed to store idempotency response for key ${idempotencyKey}: ${storeErr}`,
+            );
             return of(responseBody);
           }),
         );

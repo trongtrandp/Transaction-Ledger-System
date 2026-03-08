@@ -19,10 +19,7 @@ describe('NotificationProcessor', () => {
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        NotificationProcessor,
-        { provide: PrismaService, useValue: mockPrisma },
-      ],
+      providers: [NotificationProcessor, { provide: PrismaService, useValue: mockPrisma }],
     }).compile();
 
     processor = module.get(NotificationProcessor);

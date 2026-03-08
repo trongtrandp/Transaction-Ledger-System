@@ -12,7 +12,9 @@ if (cluster.isPrimary) {
   }
 
   cluster.on('exit', (worker: { process: { pid: number } }, code: number, signal: string) => {
-    console.warn(`Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Restarting...`);
+    console.warn(
+      `Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Restarting...`,
+    );
     cluster.fork();
   });
 } else {

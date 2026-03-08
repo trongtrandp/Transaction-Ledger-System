@@ -33,7 +33,10 @@ describe('IdempotencyService', () => {
         IdempotencyService,
         { provide: RedisService, useValue: mockRedis },
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: ConfigService, useValue: { get: (key: string, defaultVal: unknown) => defaultVal ?? 24 } },
+        {
+          provide: ConfigService,
+          useValue: { get: (key: string, defaultVal: unknown) => defaultVal ?? 24 },
+        },
       ],
     }).compile();
 
@@ -154,7 +157,9 @@ describe('IdempotencyService', () => {
       (prisma.idempotencyRecord.create as jest.Mock).mockRejectedValue(dbError);
       redis.del.mockResolvedValue(undefined);
 
-      await expect(service.checkAndAcquire('key-1', 'hash-abc')).rejects.toThrow('DB connection lost');
+      await expect(service.checkAndAcquire('key-1', 'hash-abc')).rejects.toThrow(
+        'DB connection lost',
+      );
       expect(redis.del).toHaveBeenCalledWith('idempotency:key-1');
     });
   });
@@ -209,7 +214,9 @@ describe('IdempotencyService', () => {
     });
 
     it('should still delete Redis key when DB delete fails with non-P2025 error', async () => {
-      (prisma.idempotencyRecord.delete as jest.Mock).mockRejectedValue(new Error('DB connection lost'));
+      (prisma.idempotencyRecord.delete as jest.Mock).mockRejectedValue(
+        new Error('DB connection lost'),
+      );
       redis.del.mockResolvedValue(undefined);
 
       await expect(service.release('key-1')).resolves.not.toThrow();
